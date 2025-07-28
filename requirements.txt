@@ -1,6 +1,10 @@
-Flask
-Flask-Cors
+flask
+flask_cors
 psycopg2-binary
-PyMuPDF
-requests
+werkzeug
 python-dotenv
+requests
+PyMuPDF
+pytesseract
+Pillow
+gunicorn
