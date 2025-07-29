@@ -10,6 +10,10 @@ import requests
 import json
 from dotenv import load_dotenv
 import contextlib
+from pdf2image import convert_from_bytes
+import base64
+import time
+import io
 
 load_dotenv()
 app = Flask(__name__)
@@ -21,6 +25,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # --- Gemini API Details (from Environment Variables) ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+
+# --- OCR.space API Details ---
+OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "")
 
 # --- IMPROVEMENT: Database Connection Pooling ---
 # Create a connection pool instead of single connections for better performance.
@@ -75,11 +82,138 @@ def initialize_database():
     except Exception as e:
         print(f"DATABASE SCHEMA ERROR: {e}")
 
-def extract_text_from_pdf(pdf_bytes):
-    """Extracts text from a PDF."""
+def ocr_space_api(image_bytes, is_pdf=False):
+    """Use OCR.space API for single image/page OCR."""
+    if not OCR_SPACE_API_KEY:
+        print("OCR_SPACE_API_KEY not configured")
+        return None
+        
     try:
+        # Convert to base64
+        img_base64 = base64.b64encode(image_bytes).decode()
+        
+        # Determine file type
+        file_type = 'PDF' if is_pdf else 'PNG'
+        data_prefix = f'data:application/pdf;base64,' if is_pdf else f'data:image/png;base64,'
+        
+        url = 'https://api.ocr.space/parse/image'
+        payload = {
+            'apikey': OCR_SPACE_API_KEY,
+            'base64Image': data_prefix + img_base64,
+            'filetype': file_type,
+            'detectOrientation': 'true',
+            'isCreateSearchablePdf': 'false',
+            'scale': 'true',
+            'isTable': 'true',
+            'OCREngine': '2'  # Better engine
+        }
+        
+        response = requests.post(url, data=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get('IsErroredOnProcessing'):
+            print(f"OCR.space error: {result.get('ErrorMessage', 'Unknown error')}")
+            return None
+            
+        # Extract text from response
+        text = ""
+        for page in result.get('ParsedResults', []):
+            text += page.get('ParsedText', '') + "\n"
+            
+        return text.strip() if text.strip() else None
+        
+    except requests.exceptions.RequestException as e:
+        print(f"OCR.space API request error: {e}")
+        return None
+    except Exception as e:
+        print(f"OCR.space API error: {e}")
+        return None
+
+def ocr_scanned_pdf(pdf_bytes):
+    """Handle multi-page scanned PDFs with OCR.space API."""
+    try:
+        # Convert PDF to images (one per page)
+        print("🔄 Converting PDF to images for OCR...")
+        images = convert_from_bytes(pdf_bytes, dpi=200, fmt='PNG')
+        
+        total_pages = len(images)
+        print(f"📄 Found {total_pages} pages to process with OCR")
+        
+        all_text = ""
+        success_count = 0
+        
+        # Process each page individually (OCR.space limit: 3 pages per request)
+        for i, image in enumerate(images):
+            try:
+                print(f"🔍 OCR processing page {i+1}/{total_pages}")
+                
+                # Convert PIL image to bytes
+                img_byte_arr = io.BytesIO()
+                image.save(img_byte_arr, format='PNG', optimize=True, quality=85)
+                img_bytes = img_byte_arr.getvalue()
+                
+                # Check image size (OCR.space limit: 1MB)
+                if len(img_bytes) > 1024 * 1024:  # 1MB
+                    print(f"⚠️ Page {i+1} too large, compressing...")
+                    # Reduce quality for large images
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format='PNG', optimize=True, quality=60)
+                    img_bytes = img_byte_arr.getvalue()
+                
+                # OCR this single page
+                page_text = ocr_space_api(img_bytes, is_pdf=False)
+                
+                if page_text:
+                    all_text += f"\n--- Page {i+1} ---\n{page_text}\n"
+                    success_count += 1
+                    print(f"✅ Page {i+1} processed successfully")
+                else:
+                    print(f"⚠️ Page {i+1} OCR failed")
+                
+                # Add small delay to respect API limits
+                if i < total_pages - 1:  # Don't sleep after last page
+                    time.sleep(0.5)  # 500ms delay between requests
+                    
+            except Exception as page_error:
+                print(f"❌ Error processing page {i+1}: {page_error}")
+                continue
+        
+        print(f"📊 OCR completed: {success_count}/{total_pages} pages successful")
+        
+        if all_text.strip():
+            return all_text.strip()
+        else:
+            print("❌ No text extracted from any page")
+            return None
+            
+    except Exception as e:
+        print(f"OCR PROCESSING ERROR: {e}")
+        return None
+
+def extract_text_from_pdf(pdf_bytes):
+    """Enhanced PDF extraction with OCR fallback for scanned documents."""
+    try:
+        # Method 1: Try regular text extraction first (fastest for digital PDFs)
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            return "".join(page.get_text() for page in doc)
+            text = "".join(page.get_text() for page in doc)
+            
+            # Check if we got meaningful text (not just whitespace/garbled)
+            if text.strip() and len(text.strip()) > 100:
+                print("✅ Text extracted directly from PDF (digital PDF)")
+                return text
+                
+        print("⚠️ No readable text found - appears to be scanned PDF, trying OCR...")
+        
+        # Method 2: OCR fallback for scanned PDFs
+        ocr_text = ocr_scanned_pdf(pdf_bytes)
+        if ocr_text:
+            print("✅ Text extracted via OCR (scanned PDF)")
+            return ocr_text
+        else:
+            print("❌ Both direct extraction and OCR failed")
+            return None
+            
     except Exception as e:
         print(f"PDF EXTRACTION ERROR: {e}")
         return None
@@ -152,8 +286,17 @@ def call_gemini_api(text):
 # ADD HEALTH CHECK ENDPOINT
 @app.route('/', methods=['GET'])
 def health_check():
-    """Simple health check"""
-    return jsonify({"status": "healthy", "app": "tax-analyzer-backend"}), 200
+    """Simple health check with service status"""
+    status = {
+        "status": "healthy",
+        "app": "tax-analyzer-backend",
+        "features": {
+            "database": bool(app.db_pool),
+            "gemini_api": bool(GEMINI_API_KEY),
+            "ocr_api": bool(OCR_SPACE_API_KEY)
+        }
+    }
+    return jsonify(status), 200
 
 @app.route('/register', methods=['POST'])
 def register_user():
@@ -217,10 +360,15 @@ def summarize_notice():
 
     file = request.files['notice_pdf']
     pdf_bytes = file.read()
+    
+    print(f"📄 Processing PDF: {file.filename} ({len(pdf_bytes)} bytes)")
+    
     raw_text = extract_text_from_pdf(pdf_bytes)
     if not raw_text:
-        return jsonify({"success": False, "message": "Could not read text from PDF."}), 500
+        return jsonify({"success": False, "message": "Could not read text from PDF. Please ensure the PDF contains readable text or images."}), 500
 
+    print(f"📝 Extracted text length: {len(raw_text)} characters")
+    
     summary_json = call_gemini_api(raw_text)
     if not summary_json:
         return jsonify({"success": False, "message": "Failed to get summary from AI."}), 500
@@ -233,17 +381,20 @@ def summarize_notice():
         return jsonify({"success": False, "message": "AI returned an invalid format."}), 500
 
 # Initialize database when app starts
-print("Starting Tax Analyzer Backend...")
+print("Starting Enhanced Tax Analyzer Backend with OCR...")
+print(f"Features enabled:")
+print(f"  - Database: {'✅' if app.db_pool else '❌'}")
+print(f"  - Gemini API: {'✅' if GEMINI_API_KEY else '❌'}")
+print(f"  - OCR.space API: {'✅' if OCR_SPACE_API_KEY else '❌'}")
+
 if app.db_pool:
     with app.app_context():
         initialize_database()
 else:
     print("Database disabled - continuing without DB features")
 
-# Replace the last few lines in your tax_analyzer_backend.py:
-
 if __name__ == '__main__':
     # Railway sets PORT environment variable
-    port = int(os.environ.get('PORT', 5000))  # Changed from 8000 to 5000
+    port = int(os.environ.get('PORT', 5000))
     print(f"Starting server on port {port}")
     app.run(debug=False, host='0.0.0.0', port=port)
