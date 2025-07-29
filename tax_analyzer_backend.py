@@ -1,41 +1,3 @@
-# 1. Create startup.sh file in your project root
-#!/bin/bash
-# startup.sh
-set -e
-
-echo "Starting Tax Analyzer Backend..."
-
-# Activate virtual environment if it exists
-if [ -d "antenv" ]; then
-    source antenv/bin/activate
-    echo "Virtual environment activated"
-fi
-
-# Install dependencies if requirements.txt exists
-if [ -f "requirements.txt" ]; then
-    echo "Installing dependencies..."
-    pip install -r requirements.txt
-fi
-
-# Start the Flask application
-echo "Starting Flask application on port 8000..."
-python tax_analyzer_backend.py
-
----
-
-# 2. Update requirements.txt (fix duplicate werkzeug)
-Flask==2.3.2
-Flask-Cors==4.0.0
-psycopg2-binary==2.9.9
-PyMuPDF==1.23.22
-requests==2.31.0
-python-dotenv==1.0.0
-werkzeug==2.3.7
-gunicorn==21.2.0
-
----
-
-# 3. Create/update tax_analyzer_backend.py (main fixes)
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -60,22 +22,18 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
-# --- Database Connection Pooling ---
-app.db_pool = None
-
-def init_db_pool():
-    """Initialize database connection pool with error handling"""
-    global app
-    try:
-        if DATABASE_URL:
-            app.db_pool = pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
-            print("Database connection pool created successfully")
-        else:
-            print("WARNING: DATABASE_URL not set, database features will be disabled")
-    except psycopg2.Error as e:
-        print(f"Database connection error: {e}")
-        print("Database features will be disabled")
+# --- IMPROVEMENT: Database Connection Pooling ---
+# Create a connection pool instead of single connections for better performance.
+try:
+    if DATABASE_URL:
+        app.db_pool = pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
+        print("Database pool created successfully")
+    else:
+        print("DATABASE_URL not found - database features disabled")
         app.db_pool = None
+except psycopg2.Error as e:
+    print(f"Database connection error: {e}")
+    app.db_pool = None
 
 @contextlib.contextmanager
 def get_db_connection():
@@ -94,7 +52,7 @@ def get_db_connection():
 def initialize_database():
     """Creates or alters the users table to include new fields."""
     if not app.db_pool:
-        print("Skipping database initialization - pool not available")
+        print("Could not initialize database, connection pool not available.")
         return
         
     try:
@@ -191,21 +149,16 @@ def call_gemini_api(text):
         print(f"GEMINI API UNKNOWN ERROR: {e}")
         return None
 
-# Health check endpoint for Azure
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint for Azure App Service"""
-    return jsonify({"status": "healthy", "service": "tax-analyzer-backend"}), 200
-
+# ADD HEALTH CHECK ENDPOINT
 @app.route('/', methods=['GET'])
-def root():
-    """Root endpoint"""
-    return jsonify({"message": "Tax Analyzer Backend API", "status": "running"}), 200
+def health_check():
+    """Simple health check"""
+    return jsonify({"status": "healthy", "app": "tax-analyzer-backend"}), 200
 
 @app.route('/register', methods=['POST'])
 def register_user():
     if not app.db_pool:
-        return jsonify({"success": False, "message": "Database service unavailable."}), 503
+        return jsonify({"success": False, "message": "Database unavailable"}), 503
         
     data = request.get_json()
     required_fields = ['firstName', 'lastName', 'email', 'password', 'dob', 'mobileNumber']
@@ -237,7 +190,7 @@ def register_user():
 @app.route('/login', methods=['POST'])
 def login_user():
     if not app.db_pool:
-        return jsonify({"success": False, "message": "Database service unavailable."}), 503
+        return jsonify({"success": False, "message": "Database unavailable"}), 503
         
     data = request.get_json()
     if not data or not all(k in data for k in ['email', 'password']):
@@ -279,113 +232,16 @@ def summarize_notice():
         print(f"AI returned invalid JSON: {summary_json}")
         return jsonify({"success": False, "message": "AI returned an invalid format."}), 500
 
-# Initialize database connection and schema
-print("Initializing Tax Analyzer Backend...")
-init_db_pool()
-
-# Initialize database schema if pool is available
+# Initialize database when app starts
+print("Starting Tax Analyzer Backend...")
 if app.db_pool:
     with app.app_context():
         initialize_database()
+else:
+    print("Database disabled - continuing without DB features")
 
 if __name__ == '__main__':
-    # Azure App Service uses PORT environment variable
+    # Use PORT from environment (Azure sets this automatically)
     port = int(os.environ.get('PORT', 8000))
     print(f"Starting server on port {port}")
-    
-    # For production, we should use a proper WSGI server
-    # But for Azure App Service, this should work
     app.run(debug=False, host='0.0.0.0', port=port)
-
----
-
-# 4. Create .deployment file in project root
-[config]
-command = bash startup.sh
-
----
-
-# 5. Update GitHub Actions workflow
-name: Build and deploy Python app to Azure Web App - tax-analyzer-backend
-
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python version
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-
-      - name: Create and start virtual environment
-        run: |
-          python -m venv antenv
-          source antenv/bin/activate
-      
-      - name: Install dependencies
-        run: |
-          source antenv/bin/activate
-          pip install --upgrade pip
-          pip install -r requirements.txt
-        
-      - name: Make startup script executable
-        run: chmod +x startup.sh
-
-      - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
-
-      - name: Upload artifact for deployment jobs
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-app
-          path: |
-            release.zip
-            !antenv/
-
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Download artifact from build job
-        uses: actions/download-artifact@v4
-        with:
-          name: python-app
-
-      - name: Unzip artifact for deployment
-        run: unzip release.zip
-
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_7C2650E62F714687BA80D61865985BC6 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_3BEC2FAD5A034E82A40C6FA6499D457D }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_13C3E239FFA446D18C4F6EC4C43F42D3 }}
-
-      - name: 'Deploy to Azure Web App'
-        uses: azure/webapps-deploy@v3
-        id: deploy-to-webapp
-        with:
-          app-name: 'tax-analyzer-backend'
-          slot-name: 'Production'
-          app-settings-json: |
-            [
-                { "name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}", "slotSetting": false },
-                { "name": "GEMINI_API_KEY", "value": "${{ secrets.GEMINI_API_KEY }}", "slotSetting": false },
-                { "name": "PORT", "value": "8000", "slotSetting": false },
-                { "name": "PYTHONPATH", "value": "/home/site/wwwroot", "slotSetting": false }
-            ]
