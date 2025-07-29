@@ -1,6 +1,7 @@
-Flask
-Flask-Cors
-psycopg2-binary
-PyMuPDF
-requests
-python-dotenv
+Flask==2.3.2
+Flask-Cors==4.0.0
+psycopg2-binary==2.9.9
+PyMuPDF==1.23.22
+requests==2.31.0
+python-dotenv==1.0.0
+werkzeug==2.3.7
