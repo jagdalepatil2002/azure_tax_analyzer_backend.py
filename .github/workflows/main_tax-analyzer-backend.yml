@@ -70,13 +70,12 @@ jobs:
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_13C3E239FFA446D18C4F6EC4C43F42D3 }}
 
       - name: 'Deploy to Azure Web App'
-        uses: azure/webapps-deploy@v3
+        # FIX: Updated to a specific version (v3.2.0) to resolve the 'Unexpected input' error.
+        uses: azure/webapps-deploy@v3.2.0
         id: deploy-to-webapp
         with:
           app-name: 'tax-analyzer-backend'
           slot-name: 'Production'
-          # FIX: This section adds your secrets as App Settings (environment variables) in Azure.
-          # This is the critical change that will fix your database connection error.
           app-settings-json: |
             [
                 { "name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}", "slotSetting": false },
