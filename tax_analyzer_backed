@@ -2,13 +2,15 @@
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from flask import Flask, request, jsonify
+from psycopg2 import pool
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import fitz
 import requests
 import json
 from dotenv import load_dotenv
+import contextlib
 
 load_dotenv()
 app = Flask(__name__)
@@ -21,46 +23,54 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
+# --- IMPROVEMENT: Database Connection Pooling ---
+# Create a connection pool instead of single connections for better performance.
+try:
+    app.db_pool = pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
+except psycopg2.Error as e:
+    print(f"FATAL ERROR: Could not create database connection pool: {e}")
+    app.db_pool = None
+
+@contextlib.contextmanager
 def get_db_connection():
-    """Establishes a secure connection to the PostgreSQL database."""
-    if not DATABASE_URL:
-        print("FATAL ERROR: DATABASE_URL environment variable is not set.")
-        return None
+    """Gets a connection from the pool."""
+    if not app.db_pool:
+        raise Exception("Database pool is not available.")
+    
+    conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-        return conn
-    except psycopg2.Error as e:
-        print(f"DATABASE CONNECTION FAILED: {e}")
-        return None
+        conn = app.db_pool.getconn()
+        yield conn
+    finally:
+        if conn:
+            app.db_pool.putconn(conn)
 
 def initialize_database():
     """Creates or alters the users table to include new fields."""
-    conn = get_db_connection()
-    if not conn:
-        print("Could not initialize database, connection failed.")
+    if not app.db_pool:
+        print("Could not initialize database, connection pool not available.")
         return
-
+        
     try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    first_name VARCHAR(100) NOT NULL,
-                    last_name VARCHAR(100) NOT NULL,
-                    email VARCHAR(255) UNIQUE NOT NULL,
-                    password_hash VARCHAR(255) NOT NULL,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    dob DATE,
-                    mobile_number VARCHAR(25)
-                );
-            """)
-            conn.commit()
-            print("Database schema verified successfully.")
-    except psycopg2.Error as e:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        first_name VARCHAR(100) NOT NULL,
+                        last_name VARCHAR(100) NOT NULL,
+                        email VARCHAR(255) UNIQUE NOT NULL,
+                        password_hash VARCHAR(255) NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        dob DATE,
+                        mobile_number VARCHAR(25)
+                    );
+                """)
+                conn.commit()
+                print("Database schema verified successfully.")
+    except Exception as e:
         print(f"DATABASE SCHEMA ERROR: {e}")
-    finally:
-        if conn:
-            conn.close()
+
 
 def extract_text_from_pdf(pdf_bytes):
     """Extracts text from a PDF."""
@@ -140,30 +150,27 @@ def register_user():
         return jsonify({"success": False, "message": "Missing required fields."}), 400
 
     password_hash = generate_password_hash(data['password'])
-    conn = get_db_connection()
-    if not conn: return jsonify({"success": False, "message": "Database connection error."}), 500
-
+    
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE email = %s;", (data['email'],))
-            if cur.fetchone():
-                return jsonify({"success": False, "message": "This email address is already in use."}), 409
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE email = %s;", (data['email'],))
+                if cur.fetchone():
+                    return jsonify({"success": False, "message": "This email address is already in use."}), 409
 
-            sql = """
-                INSERT INTO users (first_name, last_name, email, password_hash, dob, mobile_number)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id, first_name, email;
-            """
-            cur.execute(sql, (data['firstName'], data['lastName'], data['email'], password_hash, data['dob'], data['mobileNumber']))
-            new_user = cur.fetchone()
-            conn.commit()
-            return jsonify({"success": True, "user": new_user}), 201
-    except psycopg2.Error as e:
+                sql = """
+                    INSERT INTO users (first_name, last_name, email, password_hash, dob, mobile_number)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id, first_name, email;
+                """
+                cur.execute(sql, (data['firstName'], data['lastName'], data['email'], password_hash, data['dob'], data['mobileNumber']))
+                new_user = cur.fetchone()
+                conn.commit()
+                return jsonify({"success": True, "user": new_user}), 201
+    except Exception as e:
         print(f"REGISTRATION DB ERROR: {e}")
         return jsonify({"success": False, "message": "An internal error occurred."}), 500
-    finally:
-        if conn:
-            conn.close()
+
 
 @app.route('/login', methods=['POST'])
 def login_user():
@@ -171,27 +178,25 @@ def login_user():
     if not data or not all(k in data for k in ['email', 'password']):
         return jsonify({"success": False, "message": "Missing email or password."}), 400
 
-    conn = get_db_connection()
-    if not conn: return jsonify({"success": False, "message": "Database connection error."}), 500
-
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE email = %s;", (data['email'],))
-            user = cur.fetchone()
-            if user and check_password_hash(user['password_hash'], data['password']):
-                user_data = {"id": user['id'], "firstName": user['first_name'], "email": user['email']}
-                return jsonify({"success": True, "user": user_data}), 200
-            else:
-                return jsonify({"success": False, "message": "Invalid email or password."}), 401
-    except psycopg2.Error as e:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM users WHERE email = %s;", (data['email'],))
+                user = cur.fetchone()
+                if user and check_password_hash(user['password_hash'], data['password']):
+                    user_data = {"id": user['id'], "firstName": user['first_name'], "email": user['email']}
+                    return jsonify({"success": True, "user": user_data}), 200
+                else:
+                    return jsonify({"success": False, "message": "Invalid email or password."}), 401
+    except Exception as e:
         print(f"LOGIN DB ERROR: {e}")
         return jsonify({"success": False, "message": "An internal error occurred."}), 500
-    finally:
-        if conn:
-            conn.close()
+
 
 @app.route('/summarize', methods=['POST'])
 def summarize_notice():
+    # NOTE: As per the analysis, this endpoint should be secured.
+    # This will be the next step after confirming login works.
     if 'notice_pdf' not in request.files:
         return jsonify({"success": False, "message": "No PDF file provided."}), 400
 
