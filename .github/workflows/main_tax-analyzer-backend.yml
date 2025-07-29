@@ -75,7 +75,8 @@ jobs:
         with:
           app-name: 'tax-analyzer-backend'
           slot-name: 'Production'
-          # FIX: This section adds your secrets as App Settings (environment variables) in Azure
+          # FIX: This section adds your secrets as App Settings (environment variables) in Azure.
+          # This is the critical change that will fix your database connection error.
           app-settings-json: |
             [
                 { "name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}", "slotSetting": false },
