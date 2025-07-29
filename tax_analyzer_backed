@@ -5,15 +5,10 @@ from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-import fitz  # PyMuPDF
+import fitz
 import requests
 import json
 from dotenv import load_dotenv
-
-# --- OCR Integration ---
-import pytesseract
-from PIL import Image # Pillow library
-import io
 
 load_dotenv()
 app = Flask(__name__)
@@ -68,54 +63,12 @@ def initialize_database():
             conn.close()
 
 def extract_text_from_pdf(pdf_bytes):
-    """
-    Extracts text from a PDF using a two-step process:
-    1. Tries a fast direct text extraction.
-    2. If that fails, falls back to OCR for image-based PDFs.
-    """
-    # --- Step 1: Try direct text extraction with PyMuPDF (fitz) ---
+    """Extracts text from a PDF."""
     try:
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            text = "".join(page.get_text() for page in doc)
-        
-        # If text is found, return it immediately.
-        if text.strip():
-            print("Successfully extracted text directly from PDF.")
-            return text
-            
+            return "".join(page.get_text() for page in doc)
     except Exception as e:
-        print(f"Direct PDF text extraction failed: {e}. Attempting OCR.")
-
-    # --- Step 2: Fallback to OCR if no text was found ---
-    print("Direct extraction yielded no text. Starting OCR fallback...")
-    try:
-        full_ocr_text = ""
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                # Render page to an image (pixmap)
-                pix = page.get_pixmap(dpi=300) # Higher DPI for better OCR accuracy
-                
-                # Convert pixmap to a PIL Image
-                img_bytes = pix.tobytes("png")
-                image = Image.open(io.BytesIO(img_bytes))
-
-                # Use pytesseract to do OCR on the image
-                # We specify English ('eng') as the language
-                page_text = pytesseract.image_to_string(image, lang='eng')
-                full_ocr_text += page_text + "\n"
-        
-        if full_ocr_text.strip():
-            print("Successfully extracted text using OCR.")
-            return full_ocr_text
-        else:
-            print("OCR process completed but found no text.")
-            return None
-
-    except Exception as e:
-        # This can happen if Tesseract is not installed or not in the system's PATH
-        print(f"OCR EXTRACTION ERROR: {e}")
-        print("Ensure Tesseract is installed and accessible in your system's PATH.")
+        print(f"PDF EXTRACTION ERROR: {e}")
         return None
 
 def call_gemini_api(text):
@@ -163,7 +116,7 @@ def call_gemini_api(text):
         response.raise_for_status()
         result = response.json()
 
-        if 'candidates' in result and result['candidates'] and 'content' in result['candidates'][0] and 'parts' in result['candidates'][0]['content']['parts']:
+        if 'candidates' in result and result['candidates'] and 'content' in result['candidates'][0] and 'parts' in result['candidates'][0]['content'] and result['candidates'][0]['content']['parts']:
             summary_json_string = result['candidates'][0]['content']['parts'][0]['text']
             if summary_json_string.strip().startswith("```json"):
                 summary_json_string = summary_json_string.strip()[7:-3]
@@ -246,7 +199,7 @@ def summarize_notice():
     pdf_bytes = file.read()
     raw_text = extract_text_from_pdf(pdf_bytes)
     if not raw_text:
-        return jsonify({"success": False, "message": "Could not read text from PDF. The document may be empty or unreadable."}), 500
+        return jsonify({"success": False, "message": "Could not read text from PDF."}), 500
 
     summary_json = call_gemini_api(raw_text)
     if not summary_json:
