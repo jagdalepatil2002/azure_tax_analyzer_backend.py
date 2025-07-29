@@ -240,8 +240,10 @@ if app.db_pool:
 else:
     print("Database disabled - continuing without DB features")
 
+# Replace the last few lines in your tax_analyzer_backend.py:
+
 if __name__ == '__main__':
-    # Use PORT from environment (Azure sets this automatically)
-    port = int(os.environ.get('PORT', 8000))
+    # Railway sets PORT environment variable
+    port = int(os.environ.get('PORT', 5000))  # Changed from 8000 to 5000
     print(f"Starting server on port {port}")
     app.run(debug=False, host='0.0.0.0', port=port)
