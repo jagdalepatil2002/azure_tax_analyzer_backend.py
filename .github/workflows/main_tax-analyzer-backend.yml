@@ -70,8 +70,8 @@ jobs:
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_13C3E239FFA446D18C4F6EC4C43F42D3 }}
 
       - name: 'Deploy to Azure Web App'
-        # FIX: Updated to a specific version (v3.2.0) to resolve the 'Unexpected input' error.
-        uses: azure/webapps-deploy@v3.2.0
+        # FIX: Updated to the correct major version tag (@v3) to resolve the action resolution error.
+        uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
           app-name: 'tax-analyzer-backend'
